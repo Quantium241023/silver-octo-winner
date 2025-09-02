@@ -148,8 +148,8 @@ longQty  = longSplitUsd / close
 shortQty = shortSplitUsd / close
 
 // 익절 조건 추가
-shortTakeProfitCondition = strategy.position_size > 0 and barstate.isconfirmed and close <= (strategy.position_avg_price * (1 - shorttakePct))
-longTakeProfitCondition = strategy.position_size < 0 and barstate.isconfirmed and close >= (strategy.position_avg_price * (1 + longtakePct))
+shortTakeProfitCondition = strategy.position_size < 0 and barstate.isconfirmed and close <= (strategy.position_avg_price * (1 - shorttakePct))
+longTakeProfitCondition = strategy.position_size > 0 and barstate.isconfirmed and close >= (strategy.position_avg_price * (1 + longtakePct))
 
 // 손절 조건 추가
 shortStopLossCondition = strategy.position_size < 0 and ta.crossover(df_current_sum, obLevel2)  // 숏 포지션 손절 조건
