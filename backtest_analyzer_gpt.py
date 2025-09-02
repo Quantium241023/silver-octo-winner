@@ -95,7 +95,38 @@ def detect_initial_cap_from_workbook(file_path):
     except Exception:
         return None, None
 
-    # 1) 컬럼명 기반 검색
+    # 1) 우선 'Properties' 시트 검사 (많은 트레이더 툴이 이 시트를 사용함)
+    for sheet_name in list(sheets.keys()):
+        if str(sheet_name).strip().lower() == 'properties':
+            try:
+                df_prop = pd.read_excel(file_path, sheet_name=sheet_name, header=None)
+                arr = df_prop.values
+                rows = arr.shape[0]
+                cols = arr.shape[1] if arr.shape[1] > 0 else 0
+                for i in range(rows):
+                    for j in range(cols):
+                        try:
+                            cell = arr[i, j]
+                        except Exception:
+                            continue
+                        if pd.isna(cell):
+                            continue
+                        cell_str = str(cell).strip().lower()
+                        # 좀 더 정확히 'initial capital' 라벨을 우선 탐색
+                        if 'initial' in cell_str and 'capital' in cell_str or 'initial capital' in cell_str or cell_str == 'initial_capital':
+                            candidate = None
+                            if j + 1 < cols:
+                                candidate = arr[i, j + 1]
+                            if (candidate is None or pd.isna(candidate)) and i + 1 < rows:
+                                candidate = arr[i + 1, j]
+                            if candidate is not None and not pd.isna(candidate):
+                                num = pd.to_numeric(candidate, errors='coerce')
+                                if not np.isnan(num):
+                                    return float(num), f"sheet '{sheet_name}' label '{cell}' at ({i+1},{j+1})"
+            except Exception:
+                pass
+
+    # 2) 컬럼명 기반 검색
     for sheet_name, df_sheet in sheets.items():
         try:
             for col in df_sheet.columns:
