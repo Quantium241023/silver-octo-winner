@@ -1,0 +1,185 @@
+//@version=5
+strategy("Integrated WaveTrend Strategy with SMT Divergence", 
+     shorttitle="SMT(WT+ATR)", overlay=false, pyramiding=3)
+
+// ================= 거래 시작/종료 시간 입력 =================
+trade_start = input.time(timestamp("2025-01-01T00:00:00"), "Trading Start Time")
+trade_end   = input.time(timestamp("2030-12-31T23:59:59"), "Trading End Time")
+
+// 거래 가능 여부
+inTradingWindow = (time >= trade_start and time <= trade_end)
+
+// ================= 거래 시작 시 수직선 표시 =================
+var bool linePlotted = false
+if (not linePlotted and time >= trade_start)
+    line.new(bar_index, -5000, bar_index, 5000, extend=extend.none, color=color.green, style=line.style_dashed, width=2)
+    label.new(bar_index, high, "Trading Start", color=color.new(color.green,70), textcolor=color.white, style=label.style_label_down)
+    linePlotted := true
+
+// 사용자 입력
+n1 = input.int(10, "Channel Length")
+n2 = input.int(21, "Average Length")
+n3 = input.int(14, "ATR Length")
+df_long_th = input.float(0, "df Long Threshold", step=0.1)
+df_short_th = input.float(0, "df Short Threshold", step=0.1)
+df_longcur_th = input.float(100, "df Longcur Threshold", step=0.1)
+df_shortcur_th = input.float(-90, "df Shortcur Threshold", step=0.1)
+longtakePct = (input.float(10, "Long Take Profit", step=0.5) / 100)
+shorttakePct = (input.float(10, "Short Take Profit", step=0.5) / 100)
+obLevel1 = input.float(75, "Over Bought Level 1", step=0.1)
+obLevel2 = input.float(53, "Over Bought Level 2", step=0.1)
+osLevel1 = input.float(-75, "Over Sold Level 1", step=0.1)
+osLevel2 = input.float(-53, "Over Sold Level 2", step=0.1)
+scaling_factor = input.float(0.015, "Scaling Factor", step=0.00001)
+
+// 레버리지와 진입금액 비율 입력
+leverage = input.float(10, "Leverage", step=1, minval=1)
+long_entry_ratio = input.float(50, "Long Entry Amount Percentage", step=1, minval=1, maxval=100) / 100
+short_entry_ratio = input.float(50, "Short Entry Amount Percentage", step=1, minval=1, maxval=100) / 100
+
+// 시간 프레임 사용자 입력 추가
+user_timeframe = input.timeframe("5", title="Timeframe")
+
+// 비교할 종목 심볼 입력 (드롭다운 방식)
+first_symbol = input.string("OKX:BTCUSDT.P", title="First Symbol", options=["OKX:BTCUSDT.P", "OKX:ETHUSDT.P", "BTC.D", "USDT.D", "TOTAL", "TOTAL2", "TOTAL3", "OKX:TONUSDT.P", "OKX:SOLUSDT.P", "OKX:ORDIUSDT.P", "OKX:TRXUSDT.P", "OKX:DOTUSDT.P","OKX:DOGEUSDT.P", "OKX:XRPUSDT.P", "OKX:ADAUSDT.P", "OKX:AVAXUSDT.P", "OKX:SHIBUSDT.P", "OKX:NEARUSDT.P", "OKX:LINKUSDT.P", "OKX:LTCUSDT.P", "OKX:BCHUSDT.P", "OKX:SANDUSDT.P"])
+second_symbol = input.string("OKX:ETHUSDT.P", title="Second Symbol", options=["OKX:BTCUSDT.P", "OKX:ETHUSDT.P", "BTC.D", "USDT.D", "TOTAL", "TOTAL2", "TOTAL3", "OKX:TONUSDT.P", "OKX:SOLUSDT.P", "OKX:ORDIUSDT.P", "OKX:TRXUSDT.P", "OKX:DOTUSDT.P","OKX:DOGEUSDT.P", "OKX:XRPUSDT.P", "OKX:ADAUSDT.P", "OKX:AVAXUSDT.P", "OKX:SHIBUSDT.P", "OKX:NEARUSDT.P", "OKX:LINKUSDT.P", "OKX:LTCUSDT.P", "OKX:BCHUSDT.P", "OKX:SANDUSDT.P"])
+
+// 가격 계산 방식 선택 (hlc3, hl2, ohlc4 등)
+price_type = input.string("hlc3", title="Price Type", options=["hlc3", "hl2", "hlco4", "close", "open"])
+
+// 차이 계산 방법 선택 (드롭다운)
+diff_option = input.string("first wt1 - second wt1", title="Difference Option", options=["first wt1 - second wt1", "first wt1 - second wt2", "first wt2 - second wt1", "first wt2 - second wt2", "second wt1 - first wt1", "second wt1 - first wt2", "second wt2 - first wt1", "second wt2 - first wt2"])
+
+// 가격 계산 함수
+f_getPrice(price_type) =>
+    if price_type == "hlc3"
+        (high + low + close) / 3
+    else if price_type == "hl2"
+        (high + low) / 2
+    else if price_type == "hlco4"
+        (high + low + close + open) / 4
+    else if price_type == "close"
+        close
+    else if price_type == "open"
+        open
+
+// 사용자 선택 종목 데이터 불러오기
+first_futures = request.security(first_symbol, user_timeframe, f_getPrice(price_type), lookahead=barmerge.lookahead_off)
+second_futures = request.security(second_symbol, user_timeframe, f_getPrice(price_type), lookahead=barmerge.lookahead_off)
+current_futures = request.security(syminfo.tickerid, user_timeframe, f_getPrice(price_type), lookahead=barmerge.lookahead_off)
+
+// WaveTrend 계산 함수
+f_waveTrend(_source, _n1, _n2, _n3, _scaling_factor) =>
+    esa = ta.ema(_source, _n1)
+    d = ta.ema(math.abs(_source - esa), _n1)
+    atr = ta.atr(_n3)
+    ci = (_source - esa) / (_scaling_factor * d / atr)
+    tci = ta.ema(ci, _n2)
+    wt1 = tci
+    wt2 = ta.sma(wt1, 4)
+    [wt1, wt2]
+
+// 사용자 선택 종목 WaveTrend 계산
+[first_wt1, first_wt2] = f_waveTrend(first_futures, n1, n2, n3, scaling_factor)
+[second_wt1, second_wt2] = f_waveTrend(second_futures, n1, n2, n3, scaling_factor)
+[current_wt1, current_wt2] = f_waveTrend(current_futures, n1, n2, n3, scaling_factor)
+
+// 두 종목의 wt1과 wt2 차이
+var float df = na
+if diff_option == "first wt1 - second wt1"
+    df := first_wt1 - second_wt1
+else if diff_option == "first wt1 - second wt2"
+    df := first_wt1 - second_wt2
+else if diff_option == "first wt2 - second wt1"
+    df := first_wt2 - second_wt1
+else if diff_option == "first wt2 - second wt2"
+    df := first_wt2 - second_wt2
+else if diff_option == "second wt1 - first wt1"
+    df := second_wt1 - first_wt1
+else if diff_option == "second wt1 - first wt2"
+    df := second_wt1 - first_wt2
+else if diff_option == "second wt2 - first wt1"
+    df := second_wt2 - first_wt1
+else if diff_option == "second wt2 - first wt2"
+    df := second_wt2 - first_wt2
+
+// df와 current_wt1의 합 계산
+var float df_current_sum = na
+df_current_sum := df + current_wt1
+
+// 오실레이터 표시
+hline(obLevel1, "Over Bought Level 1", color=color.red)
+hline(obLevel2, "Over Bought Level 2", color=color.red)
+hline(osLevel1, "Over Sold Level 1", color=color.green)
+hline(osLevel2, "Over Sold Level 2", color=color.green)
+hline(0, "Zero Line", color=color.gray)
+plot(first_wt1, color=color.blue, title="First WT1")
+plot(second_wt1, color=color.red, title="Second WT1")
+plot(current_wt1, color=color.purple, title="Current WT1")
+plot(df, color=color.yellow, title="DF", linewidth=3)
+plot(df_current_sum, color=color.green, title="DF + Current WT1", linewidth=3)
+
+// 포지션 상태 변수
+// var bool inShort = false
+// var bool inLong = false
+// var float entryPrice = na
+
+// 진입 조건 수정
+// shortEntryCondition = barstate.isconfirmed and not inShort and (df >= df_short_th) and ta.crossunder(first_wt1, df[1])
+// longEntryCondition = barstate.isconfirmed and not inLong and (df <= df_long_th) and ta.crossover(first_wt1, df[1])
+shortEntryCondition = barstate.isconfirmed and (df >= df_short_th) and ta.crossunder(df_current_sum, df[1])
+longEntryCondition = barstate.isconfirmed and (df <= df_long_th) and ta.crossover(df_current_sum, df[1])
+
+// ================= 분할매수/매도 =================
+long_splits  = input.int(3, "Max Long Split Entries", minval=1)
+short_splits = input.int(3, "Max Short Split Entries", minval=1)
+
+// ================= 고정 크기 계산 =================
+// 총 진입 금액(USD) = equity × leverage × ratio
+longTotalUsd  = strategy.equity * leverage * long_entry_ratio
+shortTotalUsd = strategy.equity * leverage * short_entry_ratio
+
+// 분할 크기 (USD)
+longSplitUsd  = longTotalUsd / long_splits
+shortSplitUsd = shortTotalUsd / short_splits
+
+// 실제 주문 수량 = 분할 금액 ÷ 현재가
+longQty  = longSplitUsd / close
+shortQty = shortSplitUsd / close
+
+// 익절 조건 추가
+shortTakeProfitCondition = strategy.position_size > 0 and barstate.isconfirmed and close <= (strategy.position_avg_price * (1 - shorttakePct))
+longTakeProfitCondition = strategy.position_size < 0 and barstate.isconfirmed and close >= (strategy.position_avg_price * (1 + longtakePct))
+
+// 손절 조건 추가
+shortStopLossCondition = strategy.position_size < 0 and ta.crossover(df_current_sum, obLevel2)  // 숏 포지션 손절 조건
+longStopLossCondition = strategy.position_size > 0 and ta.crossunder(df_current_sum, osLevel2)  // 롱 포지션 손절 조건
+
+// ================= 롱 진입 =================
+if (inTradingWindow and longEntryCondition)
+    if (strategy.position_size <= 0)  // 신규 롱
+        if (strategy.position_size < 0)  // 숏 보유 중이라면 먼저 청산
+            strategy.close_all(comment="Close Short (Switch to Long)")
+        strategy.entry("Long_1", strategy.long, qty=longQty)
+    else if (strategy.position_size > 0 and strategy.opentrades < long_splits)  // 추가 롱
+        strategy.entry("Long_" + str.tostring(strategy.opentrades + 1), strategy.long, qty=longQty)
+
+// ================= 숏 진입 =================
+if (inTradingWindow and shortEntryCondition)
+    if (strategy.position_size >= 0)  // 신규 숏
+        if (strategy.position_size > 0)  // 롱 보유 중이라면 먼저 청산
+            strategy.close_all(comment="Close Long (Switch to Short)")
+        strategy.entry("Short_1", strategy.short, qty=shortQty)
+    else if (strategy.position_size < 0 and strategy.opentrades < short_splits)  // 추가 숏
+        strategy.entry("Short_" + str.tostring(strategy.opentrades + 1), strategy.short, qty=shortQty)
+
+// ================= 청산 =================
+if (longTakeProfitCondition or longStopLossCondition or df_current_sum >= df_longcur_th)
+    strategy.close_all(comment="Close Long")
+
+if (shortTakeProfitCondition or shortStopLossCondition or df_current_sum <= df_shortcur_th)
+    strategy.close_all(comment="Close Short")
+
+// ================= 거래 종료시간 도달 시 강제 청산 =================
+if (time > trade_end and strategy.position_size != 0)
+    strategy.close_all(comment="Force Close (Trading End)")
