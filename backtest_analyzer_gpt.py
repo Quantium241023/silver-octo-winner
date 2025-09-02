@@ -14,6 +14,71 @@ rc('font', family='Malgun Gothic')   # 윈도우라면 'Malgun Gothic'
 # 음수 기호 깨짐 방지
 plt.rcParams['axes.unicode_minus'] = False
 
+
+def analyze_liquidation_risk(df, init_cap=10000.0, leverage=10.0, maintenance_margin_rate=0.005, assume_full_exposure=True):
+    """간단한 청산 위험 분석 시뮬레이터
+
+    가정:
+      - 각 거래의 'analysis_return'은 트레이드별 PnL 비율(예: 0.02 = +2%)
+      - assume_full_exposure=True일 때 각 트레이드는 최대 레버리지로 포지션을 잡아 노티널=equity*leverage가 됨
+      - 초기 자본(init_cap)은 사용자가 입력하거나 기본값을 사용
+      - 유지증거금률(maintenance_margin_rate)은 포지션 노티널 대비 비율로, 청산 임계값 산출에 사용
+
+    반환값: dict (요약 지표)
+    """
+    eq = float(init_cap)
+    equities = [eq]
+    maintenance_multipliers = []
+    liquidation_index = None
+
+    for i, r in enumerate(df['analysis_return'].fillna(0).tolist()):
+        # 현재 포지션의 노티널과 유지증거금 계산
+        if assume_full_exposure:
+            position_notional = eq * leverage
+        else:
+            # 보수적으로 포지션 노티널을 equity로 가정(레버리지 사용 안함)
+            position_notional = eq
+
+        maintenance_margin_amount = maintenance_margin_rate * position_notional
+        maintenance_multipliers.append(maintenance_margin_amount)
+
+        # 거래 손익 (단순화: trade pnl = equity * r)
+        pnl = eq * float(r)
+        eq_after = eq + pnl
+        equities.append(eq_after)
+
+        # 청산 조건: 거래 후 자본이 유지증거금 이하로 떨어지면 청산 발생으로 간주
+        if eq_after <= maintenance_margin_amount and liquidation_index is None:
+            liquidation_index = i
+
+        eq = eq_after
+
+    equities = np.array(equities)
+    peaks = np.maximum.accumulate(equities)
+    drawdowns = (peaks - equities) / peaks
+    max_drawdown = np.nanmax(drawdowns) if len(drawdowns) > 0 else 0.0
+    min_equity = float(np.min(equities))
+    final_equity = float(equities[-1])
+    cushion = None
+    if maintenance_multipliers:
+        min_maintenance = float(np.min(maintenance_multipliers))
+        cushion = min_equity / min_maintenance if min_maintenance > 0 else float('inf')
+
+    result = {
+        'init_cap': init_cap,
+        'leverage': leverage,
+        'maintenance_margin_rate': maintenance_margin_rate,
+        'liquidation_occurred': liquidation_index is not None,
+        'liquidation_trade_index': liquidation_index,
+        'min_equity': min_equity,
+        'final_equity': final_equity,
+        'max_drawdown_pct': max_drawdown * 100.0,
+        'cushion_min': cushion,
+        'equity_series': equities,
+    }
+    return result
+
+
 def main():
     print("=== 과최적화 분석 도구 (Net P&L % 기반) ===")
     
@@ -193,6 +258,47 @@ def main():
     print(f"\n📊 리포트 저장: {report_path}")
     if img_path != "그래프 생성 실패":
         print(f"📈 그래프 저장: {img_path}")
+
+    # ------------------ 청산 위험 분석 추가 ------------------
+    try:
+        print("\n=== 청산 위험 분석 ===")
+        # 기본값: 초기자본 10,000, 레버리지 10배, 유지증거금 0.5%
+        liq = analyze_liquidation_risk(df, init_cap=10000.0, leverage=10.0, maintenance_margin_rate=0.005)
+
+        liq_report_path = os.path.join(out_dir, "liquidation_risk_report.txt")
+        with open(liq_report_path, "w", encoding="utf-8") as f:
+            f.write("=== 청산 위험 분석 리포트 ===\n")
+            for k, v in liq.items():
+                if k == 'equity_series':
+                    f.write(f"{k}: (series length={len(v)})\n")
+                else:
+                    f.write(f"{k}: {v}\n")
+
+        print(f"청산 위험 리포트 저장: {liq_report_path}")
+        print(f"청산 발생 여부: {liq['liquidation_occurred']}")
+        if liq['liquidation_occurred']:
+            print(f"청산이 발생한 거래 인덱스(0-based): {liq['liquidation_trade_index']}")
+        print(f"최소 자본: {liq['min_equity']:.2f}, 최종 자본: {liq['final_equity']:.2f}")
+        print(f"최대 드로다운(%) : {liq['max_drawdown_pct']:.2f}")
+
+        # 청산 분석 에쿼티 곡선 저장
+        try:
+            eq_series = liq['equity_series']
+            plt.figure(figsize=(10,4))
+            plt.plot(range(len(eq_series)), eq_series, color='orange')
+            plt.title('청산 위험 기반 에쿼티 곡선')
+            plt.xlabel('스텝')
+            plt.ylabel('Equity')
+            plt.grid(True, alpha=0.3)
+            eq_img_path = os.path.join(out_dir, 'liquidation_equity_curve.png')
+            plt.savefig(eq_img_path, dpi=150, bbox_inches='tight')
+            plt.close()
+            print(f"청산 에쿼티 곡선 저장: {eq_img_path}")
+        except Exception as e:
+            print(f"에쿼티 곡선 생성 실패: {e}")
+
+    except Exception as e:
+        print(f"청산 위험 분석 중 오류 발생: {e}")
 
 if __name__ == "__main__":
     main()
