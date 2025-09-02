@@ -15,7 +15,7 @@ rc('font', family='Malgun Gothic')   # 윈도우라면 'Malgun Gothic'
 plt.rcParams['axes.unicode_minus'] = False
 
 
-def analyze_liquidation_risk(df, init_cap=10000.0, leverage=10.0, maintenance_margin_rate=0.005, assume_full_exposure=True):
+def analyze_liquidation_risk(df, init_cap=300.0, leverage=10.0, maintenance_margin_rate=0.005, assume_full_exposure=True):
     """간단한 청산 위험 분석 시뮬레이터
 
     가정:
@@ -77,6 +77,69 @@ def analyze_liquidation_risk(df, init_cap=10000.0, leverage=10.0, maintenance_ma
         'equity_series': equities,
     }
     return result
+
+
+def detect_initial_cap_from_workbook(file_path):
+    """엑셀 파일에서 초기 자본을 감지하려고 시도합니다.
+
+    전략:
+      1) 각 시트를 헤더(컬럼명) 기준으로 읽어 컬럼명이 'initial','starting','capital','balance' 등을 포함하면
+         해당 컬럼에서 숫자값을 찾아 반환.
+      2) 실패하면 시트를 header=None으로 읽어 첫 10x5 영역에서 라벨-값 쌍(예: 'Initial Capital' 옆 셀)을 탐색.
+    반환: (value: float or None, source: str or None)
+    """
+    label_keywords = ['initial', 'starting', 'start', 'capital', 'balance', 'initial capital', 'initial balance']
+    try:
+        # 읽을 때 모든 시트를 로드
+        sheets = pd.read_excel(file_path, sheet_name=None)
+    except Exception:
+        return None, None
+
+    # 1) 컬럼명 기반 검색
+    for sheet_name, df_sheet in sheets.items():
+        try:
+            for col in df_sheet.columns:
+                col_lower = str(col).lower()
+                if any(k in col_lower for k in label_keywords):
+                    # 해당 컬럼에서 첫 번째 숫자값 찾기
+                    numeric_series = pd.to_numeric(df_sheet[col], errors='coerce').dropna()
+                    if not numeric_series.empty:
+                        return float(numeric_series.iloc[0]), f"sheet '{sheet_name}' column '{col}'"
+        except Exception:
+            pass
+
+    # 2) 셀 라벨-값 쌍 검색 (header=None 형태로 재읽기)
+    try:
+        raw_sheets = pd.read_excel(file_path, sheet_name=None, header=None)
+    except Exception:
+        return None, None
+
+    for sheet_name, df_raw in raw_sheets.items():
+        arr = df_raw.values
+        rows = min(10, arr.shape[0])
+        cols = min(5, arr.shape[1]) if arr.shape[1] > 0 else 0
+        for i in range(rows):
+            for j in range(cols):
+                try:
+                    cell = arr[i, j]
+                except Exception:
+                    continue
+                if pd.isna(cell):
+                    continue
+                cell_str = str(cell).strip().lower()
+                if any(k in cell_str for k in label_keywords):
+                    # 오른쪽 셀 우선, 없으면 아래 셀
+                    candidate = None
+                    if j + 1 < arr.shape[1]:
+                        candidate = arr[i, j + 1]
+                    if (candidate is None or pd.isna(candidate)) and i + 1 < arr.shape[0]:
+                        candidate = arr[i + 1, j]
+                    if candidate is not None and not pd.isna(candidate):
+                        num = pd.to_numeric(candidate, errors='coerce')
+                        if not np.isnan(num):
+                            return float(num), f"sheet '{sheet_name}' label '{cell}' at ({i+1},{j+1})"
+
+    return None, None
 
 
 def main():
@@ -262,8 +325,17 @@ def main():
     # ------------------ 청산 위험 분석 추가 ------------------
     try:
         print("\n=== 청산 위험 분석 ===")
-        # 기본값: 초기자본 10,000, 레버리지 10배, 유지증거금 0.5%
-        liq = analyze_liquidation_risk(df, init_cap=10000.0, leverage=10.0, maintenance_margin_rate=0.005)
+        # 엑셀 파일에서 초기 자본 감지 시도
+        detected_cap, source = detect_initial_cap_from_workbook(file_path)
+        if detected_cap is not None:
+            print(f"엑셀에서 초기 자본 감지: {detected_cap} ({source})")
+            init_cap_to_use = float(detected_cap)
+        else:
+            print("엑셀에서 초기 자본을 감지하지 못했습니다. 기본값 사용: 300.0")
+            init_cap_to_use = 300.0
+
+        # 기본값: 레버리지 10배, 유지증거금 0.5%
+        liq = analyze_liquidation_risk(df, init_cap=init_cap_to_use, leverage=10.0, maintenance_margin_rate=0.005)
 
         liq_report_path = os.path.join(out_dir, "liquidation_risk_report.txt")
         with open(liq_report_path, "w", encoding="utf-8") as f:
